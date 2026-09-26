@@ -96,6 +96,22 @@ public final class SearchQuery {
         return page;
     }
 
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    public static SearchQuery of(String text) {
+        return new Builder().text(text).build();
+    }
+
+    public static SearchQuery of(String text, int page) {
+        return new Builder().text(text).page(page).build();
+    }
+
+    public static SearchQuery of(String text, OrderBy orderBy, int page) {
+        return new Builder().text(text).orderBy(orderBy).page(page).build();
+    }
+
     /**
      * 用于创建 SearchQuery 实例的 Builder
      */

@@ -76,6 +76,8 @@ public abstract class AbstractJmClient implements JmClient, JmDownloadClient {
     private final ExecutorService internalExecutor;
     private final boolean isExternalExecutor;
     protected volatile String loggedInUserName;
+    protected volatile String loggedInUserId;
+    protected volatile long serverTimeOffsetSeconds = 0L;
     private final CookieManager cookieManager;
     protected final JmDomainManager domainManager;
     protected final CachePool<CacheKey, Object> cachePool;
@@ -979,6 +981,16 @@ public abstract class AbstractJmClient implements JmClient, JmDownloadClient {
      */
     public JmResponse executeRequest(Request request) throws ResponseException, NetworkException {
         try (Response response = httpClient.newCall(request).execute()) {
+            String dateHeader = response.header("Date");
+            if (dateHeader != null) {
+                try {
+                    long serverEpoch = java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME
+                            .parse(dateHeader, java.time.Instant::from)
+                            .getEpochSecond();
+                    long localEpoch = System.currentTimeMillis() / 1000L;
+                    this.serverTimeOffsetSeconds = serverEpoch - localEpoch;
+                } catch (Exception ignored) {}
+            }
             JmResponse jmResponse = new JmResponse(response);
             jmResponse.requireSuccess();
             return jmResponse;
@@ -988,12 +1000,121 @@ public abstract class AbstractJmClient implements JmClient, JmDownloadClient {
     }
 
     /**
+     * 获取最近一次从服务端响应计算的时间漂移偏移量（秒）。
+     *
+     * @return serverTime - localTime（秒）
+     */
+    public long getServerTimeOffsetSeconds() {
+        return this.serverTimeOffsetSeconds;
+    }
+
+    /**
+     * 获取底层 Cookie 管理器。
+     *
+     * @return CookieManager 实例
+     */
+    public CookieManager getCookieManager() {
+        return this.cookieManager;
+    }
+
+    /**
+     * 恢复登录会话状态与 Cookies。
+     *
+     * @param username      用户名
+     * @param userId        用户ID
+     * @param cookieStrings Cookie 列表
+     */
+    public void restoreSession(String username, String userId, List<String> cookieStrings) {
+        this.loggedInUserName = username;
+        this.loggedInUserId = userId;
+        if (cookieStrings != null && this.cookieManager != null && this.cookieManager.getCookieStore() != null) {
+            for (String c : cookieStrings) {
+                try {
+                    List<java.net.HttpCookie> parsed = java.net.HttpCookie.parse(c);
+                    for (java.net.HttpCookie cookie : parsed) {
+                        this.cookieManager.getCookieStore().add(null, cookie);
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    /**
+     * 提取当前会话中的所有 Cookie 字符串。
+     *
+     * @return Cookie 字符串列表
+     */
+    public List<String> extractCookies() {
+        List<String> list = new ArrayList<>();
+        if (this.cookieManager != null && this.cookieManager.getCookieStore() != null) {
+            for (java.net.HttpCookie cookie : this.cookieManager.getCookieStore().getCookies()) {
+                list.add(cookie.toString());
+            }
+        }
+        return list;
+    }
+
+    /**
      * 缓存用户名
      *
      * @param username 用户名
      */
     protected void cacheUsername(String username) {
         this.loggedInUserName = username;
+    }
+
+    /**
+     * 缓存用户ID
+     *
+     * @param userId 用户ID
+     */
+    protected void cacheUserId(String userId) {
+        this.loggedInUserId = userId;
+    }
+
+    /**
+     * 检查是否已登录。
+     *
+     * @return true表示已登录
+     */
+    public boolean isLoggedIn() {
+        return StringUtils.isNotBlank(this.loggedInUserName);
+    }
+
+    /**
+     * 检查客户端是否已完成初始化。
+     *
+     * @return true表示已就绪
+     */
+    public boolean isInitialized() {
+        return this.initializationState == InitializationState.READY;
+    }
+
+    /**
+     * 获取登录用户名（若未登录返回 null）。
+     *
+     * @return 用户名
+     */
+    public String getUsername() {
+        return this.loggedInUserName;
+    }
+
+    /**
+     * 获取当前登录的用户ID（若未登录或未获取到则返回 null）。
+     *
+     * @return 用户ID
+     */
+    public String getLoggedInUserId() {
+        return this.loggedInUserId;
+    }
+
+    /**
+     * 清除登录会话缓存
+     */
+    public void clearLoginSession() {
+        this.loggedInUserName = null;
+        this.loggedInUserId = null;
+        this.encryptedPassword = null;
     }
 
     /**

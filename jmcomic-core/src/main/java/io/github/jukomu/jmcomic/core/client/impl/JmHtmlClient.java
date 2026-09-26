@@ -531,7 +531,11 @@ public final class JmHtmlClient extends AbstractJmClient implements JmNovelClien
                 .addPathSegment("logout")
                 .build();
 
-        JmHtmlResponse jmHtmlResponse = executeGetRequest(url);
+        try {
+            executeGetRequest(url);
+        } finally {
+            super.clearLoginSession();
+        }
     }
 
     @Override

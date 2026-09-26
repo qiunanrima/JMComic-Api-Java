@@ -25,6 +25,35 @@ public final class JmComic {
     }
 
     /**
+     * 使用默认配置创建一个面向 Java/Kotlin 的高级门面客户端 {@link io.github.jukomu.jmcomic.core.client.JmComicClient}。
+     *
+     * @return JmComicClient
+     */
+    public static io.github.jukomu.jmcomic.core.client.JmComicClient newClient() {
+        return io.github.jukomu.jmcomic.core.client.JmComicClient.create();
+    }
+
+    /**
+     * 根据指定配置创建一个面向 Java/Kotlin 的高级门面客户端 {@link io.github.jukomu.jmcomic.core.client.JmComicClient}。
+     *
+     * @param config 客户端配置
+     * @return JmComicClient
+     */
+    public static io.github.jukomu.jmcomic.core.client.JmComicClient newClient(JmConfiguration config) {
+        return io.github.jukomu.jmcomic.core.client.JmComicClient.create(config);
+    }
+
+    /**
+     * 根据指定配置异步创建并完整初始化一个高级门面客户端 {@link io.github.jukomu.jmcomic.core.client.JmComicClient}。
+     *
+     * @param config 客户端配置
+     * @return JmComicClient Future
+     */
+    public static CompletableFuture<io.github.jukomu.jmcomic.core.client.JmComicClient> newClientAsync(JmConfiguration config) {
+        return io.github.jukomu.jmcomic.core.client.JmComicClient.createAsync(config);
+    }
+
+    /**
      * 根据配置创建一个新的 JmApiClient 实例
      *
      * @param config 客户端的配置对象

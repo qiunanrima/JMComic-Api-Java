@@ -79,6 +79,24 @@ public final class JmConfiguration {
         this.closeTimeoutMs = builder.closeTimeoutMs;
     }
 
+    /**
+     * 创建一个新的配置构建器。
+     *
+     * @return 配置构建器
+     */
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    /**
+     * 获取默认配置。
+     *
+     * @return 默认配置实例
+     */
+    public static JmConfiguration defaultConfig() {
+        return builder().build();
+    }
+
     // Getters for all fields
     public ClientType getClientType() {
         return clientType;

@@ -42,8 +42,20 @@ public final class FavoriteQuery {
         return page;
     }
 
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    public static FavoriteQuery ofPage(int page) {
+        return new Builder().page(page).build();
+    }
+
+    public static FavoriteQuery ofFolder(int folderId, int page) {
+        return new Builder().folderId(folderId).page(page).build();
+    }
+
     /**
-     * 用于创建 SearchQuery 实例的 Builder
+     * 用于创建 FavoriteQuery 实例的 Builder
      */
     public static class Builder {
         private int folderId = 0;

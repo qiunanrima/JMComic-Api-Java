@@ -53,6 +53,27 @@ public final class ForumQuery {
     }
 
     /**
+     * 快速构建查询本子评论的 ForumQuery。
+     *
+     * @param albumId 本子ID
+     * @return ForumQuery 实例
+     */
+    public static ForumQuery ofAlbum(String albumId) {
+        return album(albumId).build();
+    }
+
+    /**
+     * 快速构建查询本子评论的 ForumQuery（指定页码）。
+     *
+     * @param albumId 本子ID
+     * @param page    页码
+     * @return ForumQuery 实例
+     */
+    public static ForumQuery ofAlbum(String albumId, int page) {
+        return album(albumId).page(page).build();
+    }
+
+    /**
      * 创建查询小说评论的 Builder。
      *
      * @param novelId 小说ID

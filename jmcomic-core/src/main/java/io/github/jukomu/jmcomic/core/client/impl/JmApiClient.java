@@ -428,6 +428,9 @@ public final class JmApiClient extends AbstractJmClient implements JmNovelClient
             if (userInfo.username() != null) {
                 super.cacheUsername(userInfo.username());
             }
+            if (userInfo.uid() != null) {
+                super.cacheUserId(userInfo.uid());
+            }
 
             return userInfo;
         } catch (ResponseException e) {
@@ -667,7 +670,11 @@ public final class JmApiClient extends AbstractJmClient implements JmNovelClient
                 .addPathSegment(JmConstants.API_MEMBER_LOGOUT)
                 .build();
 
-        executePostRequest(url, new FormBody.Builder().build());
+        try {
+            executePostRequest(url, new FormBody.Builder().build());
+        } finally {
+            super.clearLoginSession();
+        }
     }
 
     @Override

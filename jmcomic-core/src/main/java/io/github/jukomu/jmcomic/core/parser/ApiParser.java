@@ -31,6 +31,42 @@ public final class ApiParser {
     }
 
     /**
+     * 获取当前可用的图片 CDN 域名。
+     * 优先使用 /setting 接口返回的 img_host（官方客户端即为全部图片使用该域名，
+     * 服务端会频繁轮换图片域名，写死的默认列表在很多网络下已失效），
+     * 未获取到时才回退为默认域名列表随机选择。
+     *
+     * @return 图片 CDN 域名（不带协议）
+     */
+    public static String pickImageDomain() {
+        if (StringUtils.isNotBlank(JmConstants.CURRENT_IMAGE_HOST)) {
+            return JmConstants.CURRENT_IMAGE_HOST;
+        }
+        return JmConstants.DEFAULT_IMAGE_DOMAINS.get(RANDOM.nextInt(JmConstants.DEFAULT_IMAGE_DOMAINS.size()));
+    }
+
+    /**
+     * 构建封面图的完整 URL。
+     * <p>
+     * 新版本 API 已不再返回封面字段（列表项 image 为空串、详情响应无该字段），
+     * 此时按官方规则用图片 CDN 拼 {@code /media/albums/{id}{size}.jpg}；
+     * 若服务器返回的是纯文件名（如 "123_3x4.jpg"）则补全域名；
+     * 已是完整 URL 时原样返回。
+     *
+     * @param albumId    本子 id
+     * @param image      服务器返回的封面字段，可能为 null/空串/文件名/完整 URL
+     * @param sizeSuffix 服务器未返回封面时使用的尺寸后缀，列表页为 "_3x4"，详情页为 ""
+     * @return 完整的封面图片 URL
+     */
+    public static String buildCoverUrl(String albumId, String image, String sizeSuffix) {
+        if (StringUtils.isNotBlank(image) && image.startsWith("http")) {
+            return image;
+        }
+        String filename = StringUtils.isNotBlank(image) ? image : albumId + sizeSuffix + ".jpg";
+        return JmConstants.PROTOCOL_HTTPS + pickImageDomain() + "/media/albums/" + filename;
+    }
+
+    /**
      * 解析本子详情页 (Album Page) 的API JSON响应
      *
      * @param json API返回的JSON字符串
@@ -138,7 +174,8 @@ public final class ApiParser {
             // purchased: 是否已购买，通常为空字符串
             String purchased = StringUtils.defaultIfBlank(getString(jsonObject, "purchased"), "");
 
-            String image = StringUtils.defaultIfBlank(getString(jsonObject, "image"), "");
+            // 新版本 API 详情响应已不再返回封面字段，服务器返回空值时用图片 CDN 按官方规则拼接
+            String image = buildCoverUrl(albumId, getString(jsonObject, "image"), "");
 
             return new JmAlbum(
                     albumId,
@@ -218,9 +255,7 @@ public final class ApiParser {
             JsonArray imagesArray = jsonObject.has("images") && jsonObject.get("images").isJsonArray()
                     ? jsonObject.getAsJsonArray("images")
                     : new JsonArray();
-            String imageDomain = JmConstants.DEFAULT_IMAGE_DOMAINS.get(
-                    RANDOM.nextInt(JmConstants.DEFAULT_IMAGE_DOMAINS.size()));
-            List<JmImage> images = buildImageList(albumId, scrambleId, imageDomain, imagesArray);
+            List<JmImage> images = buildImageList(albumId, scrambleId, pickImageDomain(), imagesArray);
 
             // 构建 photoMetas: comic_read 的 series 数组格式与 album 相同
             List<JmPhotoMeta> photoMetas;
@@ -379,8 +414,7 @@ public final class ApiParser {
             List<JmImage> images = buildImageList(
                     photoId,
                     scrambleId,
-                    // 从默认域名列表中随机选择一个
-                    JmConstants.DEFAULT_IMAGE_DOMAINS.get(RANDOM.nextInt(JmConstants.DEFAULT_IMAGE_DOMAINS.size())),
+                    pickImageDomain(),
                     imagesArray
             );
 
@@ -853,13 +887,15 @@ public final class ApiParser {
                 }
             }
 
+            String metaId = StringUtils.defaultIfBlank(getString(node, "id"), "");
             JmAlbumMeta meta = new JmAlbumMeta(
-                    StringUtils.defaultIfBlank(getString(node, "id"), ""),
+                    metaId,
                     StringUtils.defaultIfBlank(getString(node, "name"), ""),
                     authors,
                     Collections.emptyList(),
                     StringUtils.defaultIfBlank(getString(node, "description"), ""),
-                    StringUtils.defaultIfBlank(getString(node, "image"), ""),
+                    // 新版本 API 列表项的 image 为空串（无封面字段），用图片 CDN 按官方规则拼接
+                    buildCoverUrl(metaId, getString(node, "image"), "_3x4"),
                     parseCategoryMeta(node, "category"),
                     parseCategoryMeta(node, "category_sub")
             );
@@ -968,7 +1004,7 @@ public final class ApiParser {
         // 构建完整的用户头像URL: https://{imageDomain}/media/users/{photo}
         String avatarUrl = StringUtils.isNotBlank(photo)
                 ? JmConstants.PROTOCOL_HTTPS
-                  + JmConstants.DEFAULT_IMAGE_DOMAINS.get(RANDOM.nextInt(JmConstants.DEFAULT_IMAGE_DOMAINS.size()))
+                  + pickImageDomain()
                   + "/media/users/" + photo
                 : "";
 

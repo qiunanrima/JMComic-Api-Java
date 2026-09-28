@@ -29,10 +29,18 @@ public class DownloadManager implements IDownloadManager, TaskObserver {
     private final ConcurrentMap<String, BaseDownloadTask> activeTasks = new ConcurrentHashMap<>();
     private final ExecutorService executor;
     private final long closeTimeoutMs;
+    private volatile boolean closed;
 
     public DownloadManager(ExecutorService executor, long closeTimeoutMs) {
         this.executor = executor;
         this.closeTimeoutMs = closeTimeoutMs;
+    }
+
+    /**
+     * 是否已关闭。关闭后不再接受新任务，客户端重启初始化时可据此重建。
+     */
+    public boolean isClosed() {
+        return closed;
     }
 
     @Override
@@ -104,6 +112,7 @@ public class DownloadManager implements IDownloadManager, TaskObserver {
 
     @Override
     public void close() {
+        closed = true;
         for (BaseDownloadTask task : taskRegistry.values()) {
             task.cancel();
         }

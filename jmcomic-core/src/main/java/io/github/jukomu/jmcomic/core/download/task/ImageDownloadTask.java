@@ -6,6 +6,7 @@ import io.github.jukomu.jmcomic.api.download.task.BaseDownloadTask;
 import io.github.jukomu.jmcomic.api.exception.NetworkException;
 import io.github.jukomu.jmcomic.api.exception.ResponseException;
 import io.github.jukomu.jmcomic.api.model.JmImage;
+import io.github.jukomu.jmcomic.core.JmImages;
 import io.github.jukomu.jmcomic.core.crypto.JmImageTool;
 import io.github.jukomu.jmcomic.core.download.DownloadManager;
 import io.github.jukomu.jmcomic.core.util.FileUtils;
@@ -22,6 +23,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
+import java.util.List;
 import java.util.zip.GZIPInputStream;
 
 /**
@@ -152,8 +154,27 @@ public class ImageDownloadTask extends BaseDownloadTask {
     }
 
     private byte[] fetchImageBytes(JmImage image) throws IOException {
+        String downloadUrl = image.getDownloadUrl();
+        List<String> candidateDomains = JmImages.candidateDomains(downloadUrl, 3);
+        RuntimeException lastError = null;
+        for (String domain : candidateDomains) {
+            String url = JmImages.replaceDomain(downloadUrl, domain);
+            try {
+                return doFetchImageBytes(url, image);
+            } catch (ResponseException | NetworkException e) {
+                // 当前图片域名不可达或资源不存在时，切换下一个候选 CDN 域名重试
+                lastError = e;
+            }
+        }
+        if (lastError instanceof ResponseException responseException) {
+            throw responseException;
+        }
+        throw (NetworkException) lastError;
+    }
+
+    private byte[] doFetchImageBytes(String url, JmImage image) throws IOException {
         Request request = new Request.Builder()
-                .url(image.getDownloadUrl())
+                .url(url)
                 .get()
                 .build();
 

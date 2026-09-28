@@ -2,6 +2,7 @@ package io.github.jukomu.jmcomic.core.client.impl;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.JsonSyntaxException;
 import io.github.jukomu.jmcomic.api.client.JmCreatorClient;
 import io.github.jukomu.jmcomic.api.client.JmNovelClient;
 import io.github.jukomu.jmcomic.api.enums.*;
@@ -228,9 +229,45 @@ public final class JmHtmlClient extends AbstractJmClient implements JmNovelClien
                 .build();
 
         JmHtmlResponse jmHtmlResponse = executePostRequest(url, formBody);
+        // 校验服务端登录结果，失败时抛出异常，避免错误凭据被误判为登录成功
+        validateWebLoginResponse(jmHtmlResponse.getHtml());
         super.cacheUsername(username);
         // TODO 获取用户信息（当前 HTML 客户端仅缓存用户名）
         return JmUserInfo.partial(username);
+    }
+
+    /**
+     * 校验网页端登录响应。
+     * <p>
+     * 登录接口返回 JSON：成功为 {@code {"status":1,...}}，
+     * 失败为 {@code {"status":2,"errors":["無效的用戶名和/或密碼！"]}}；
+     * 若返回 HTML 页面（如风控页/登录页），同样视为失败。
+     *
+     * @param body 登录接口的响应体
+     */
+    private void validateWebLoginResponse(String body) {
+        String trimmed = body == null ? "" : body.trim();
+        if (!trimmed.startsWith("{")) {
+            throw new ResponseException("Login failed: unexpected response from server.");
+        }
+        try {
+            JsonObject json = JsonParser.parseString(trimmed).getAsJsonObject();
+            int status = json.has("status") && !json.get("status").isJsonNull()
+                    ? json.get("status").getAsInt() : -1;
+            if (status == 1) {
+                return;
+            }
+            String message = "Login failed";
+            if (json.has("errors") && json.get("errors").isJsonArray()
+                    && !json.getAsJsonArray("errors").isEmpty()) {
+                message = json.getAsJsonArray("errors").get(0).getAsString();
+            } else if (json.has("message") && !json.get("message").isJsonNull()) {
+                message = json.get("message").getAsString();
+            }
+            throw new ResponseException(message);
+        } catch (JsonSyntaxException e) {
+            throw new ParseResponseException("Failed to parse login response", e);
+        }
     }
 
     @Override

@@ -1,5 +1,6 @@
 package io.github.jukomu.jmcomic.core.client;
 
+import io.github.jukomu.jmcomic.api.enums.ClientType;
 import io.github.jukomu.jmcomic.api.enums.FavoriteFolderType;
 import io.github.jukomu.jmcomic.api.enums.VoteType;
 import io.github.jukomu.jmcomic.api.model.*;
@@ -52,23 +53,30 @@ public class JmComicClient implements Closeable {
 
     /**
      * 根据指定配置创建一个新的同步客户端。
+     * 按 {@code config.getClientType()} 自动选择底层实现（API 或 HTML）。
      *
      * @param config 客户端配置
      * @return JmComicClient 实例
      */
     public static JmComicClient create(JmConfiguration config) {
-        AbstractJmClient client = JmComic.newApiClient(config);
+        AbstractJmClient client = config.getClientType() == ClientType.HTML
+                ? JmComic.newHtmlClient(config)
+                : JmComic.newApiClient(config);
         return new JmComicClient(client);
     }
 
     /**
      * 根据指定配置异步创建并完整初始化一个客户端。
+     * 按 {@code config.getClientType()} 自动选择底层实现（API 或 HTML）。
      *
      * @param config 客户端配置
      * @return CompletableFuture 包装的 JmComicClient
      */
     public static CompletableFuture<JmComicClient> createAsync(JmConfiguration config) {
-        return JmComic.newApiClientAsync(config).thenApply(JmComicClient::new);
+        CompletableFuture<? extends AbstractJmClient> future = config.getClientType() == ClientType.HTML
+                ? JmComic.newHtmlClientAsync(config)
+                : JmComic.newApiClientAsync(config);
+        return future.thenApply(JmComicClient::new);
     }
 
     /**
@@ -124,6 +132,26 @@ public class JmComicClient implements Closeable {
      */
     public boolean isInitialized() {
         return rawClient.isInitialized();
+    }
+
+    /**
+     * 获取初始化 Future：仅在客户端完整初始化后成功完成。
+     * 初始化失败（含自动重试后仍失败）时以 {@link io.github.jukomu.jmcomic.api.exception.JmClientInitializationException} 异常完成。
+     *
+     * @return 初始化 Future
+     */
+    public CompletableFuture<Void> initializationFuture() {
+        return rawClient.initializationFuture();
+    }
+
+    /**
+     * 阻塞等待客户端完成初始化。
+     * 适用于"创建后立即调用业务方法"前确保就绪的场景。
+     *
+     * @throws io.github.jukomu.jmcomic.api.exception.JmClientInitializationException 初始化失败时
+     */
+    public void awaitInitialized() {
+        rawClient.awaitInitialized();
     }
 
     /**

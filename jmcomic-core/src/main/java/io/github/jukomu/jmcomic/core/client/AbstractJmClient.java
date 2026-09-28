@@ -10,6 +10,7 @@ import io.github.jukomu.jmcomic.api.download.enums.TaskType;
 import io.github.jukomu.jmcomic.api.download.task.BaseDownloadTask;
 import io.github.jukomu.jmcomic.api.enums.ClientType;
 import io.github.jukomu.jmcomic.api.exception.JmClientInitializationException;
+import io.github.jukomu.jmcomic.api.exception.JmComicException;
 import io.github.jukomu.jmcomic.api.exception.NetworkException;
 import io.github.jukomu.jmcomic.api.exception.ResponseException;
 import io.github.jukomu.jmcomic.api.model.*;
@@ -21,10 +22,12 @@ import io.github.jukomu.jmcomic.core.cache.CachePool;
 import io.github.jukomu.jmcomic.core.config.JmConfiguration;
 import io.github.jukomu.jmcomic.core.constant.JmConstants;
 import io.github.jukomu.jmcomic.core.crypto.JmImageTool;
+import io.github.jukomu.jmcomic.core.JmImages;
 import io.github.jukomu.jmcomic.core.download.DownloadManager;
 import io.github.jukomu.jmcomic.core.download.task.AlbumDownloadTask;
 import io.github.jukomu.jmcomic.core.download.task.ImageDownloadTask;
 import io.github.jukomu.jmcomic.core.download.task.PhotoDownloadTask;
+import io.github.jukomu.jmcomic.core.net.OkHttpBuilder;
 import io.github.jukomu.jmcomic.core.net.model.JmResponse;
 import io.github.jukomu.jmcomic.core.net.provider.DomainProbe;
 import io.github.jukomu.jmcomic.core.net.provider.JmDomainManager;
@@ -63,34 +66,30 @@ import java.util.stream.Collectors;
  */
 public abstract class AbstractJmClient implements JmClient, JmDownloadClient {
 
-    private enum InitializationState {
-        INITIALIZING,
-        READY,
-        FAILED,
-        CLOSED
-    }
-
     private final Logger logger = LoggerFactory.getLogger(AbstractJmClient.class);
     protected final JmConfiguration config;
-    protected final OkHttpClient httpClient;
-    private final ExecutorService internalExecutor;
+    protected final CookieManager cookieManager;
+    protected final JmDomainManager domainManager;
+    protected final CachePool<CacheKey, Object> cachePool;
+    private final JmClientInitializer initializer;
     private final boolean isExternalExecutor;
+    private final int resolvedPoolSize;
+    private final AtomicBoolean resourcesClosed = new AtomicBoolean(false);
+    /*
+     * httpClient / internalExecutor / downloadManager 在初始化失败重启时会被重建，
+     * 因此声明为 volatile 而非 final。
+     */
+    protected volatile OkHttpClient httpClient;
+    private volatile ExecutorService internalExecutor;
+    private volatile DownloadManager downloadManager;
     protected volatile String loggedInUserName;
     protected volatile String loggedInUserId;
     protected volatile long serverTimeOffsetSeconds = 0L;
-    private final CookieManager cookieManager;
-    protected final JmDomainManager domainManager;
-    protected final CachePool<CacheKey, Object> cachePool;
-    private final DownloadManager downloadManager;
     protected String loginHost = JmConstants.PLACEHOLDER_HOST;
     protected SecretKey memorySafeKey;
     // 存储加密后的密码
     protected byte[] encryptedPassword;
     private final Object initializationLock = new Object();
-    private final CompletableFuture<Void> initializationFuture = new CompletableFuture<>();
-    private final AtomicBoolean resourcesClosed = new AtomicBoolean(false);
-    private volatile InitializationState initializationState = InitializationState.INITIALIZING;
-    private boolean initializationStarted;
     private volatile Future<?> initializationTask;
     private volatile Thread initializationThread;
 
@@ -99,25 +98,28 @@ public abstract class AbstractJmClient implements JmClient, JmDownloadClient {
         this.httpClient = Objects.requireNonNull(httpClient);
         this.cookieManager = Objects.requireNonNull(cookieManager);
         this.domainManager = Objects.requireNonNull(domainManager);
+        this.initializer = new JmClientInitializer();
 
         /*
          * 线程池优先用用户自定义的，没有就按下载线程池大小配置创建，
          * 未配置时默认取 CPU 核心数。
          */
+        int poolSize = (config.getDownloadThreadPoolSize() > 0)
+                ? config.getDownloadThreadPoolSize()
+                : Runtime.getRuntime().availableProcessors();
+        this.resolvedPoolSize = poolSize;
         if (config.getExecutor() != null) {
             this.internalExecutor = config.getExecutor();
             this.isExternalExecutor = true;
         } else {
-            int poolSize = (config.getDownloadThreadPoolSize() > 0)
-                    ? config.getDownloadThreadPoolSize()
-                    : Runtime.getRuntime().availableProcessors();
             this.internalExecutor = Executors.newFixedThreadPool(poolSize);
             this.isExternalExecutor = false;
         }
         // 根据配置决定 CachePool
         this.cachePool = config.getCachePool();
         // 初始化 DownloadManager
-        this.downloadManager = new DownloadManager(Executors.newFixedThreadPool((config.getDownloadThreadPoolSize() > 0) ? config.getDownloadThreadPoolSize() : Runtime.getRuntime().availableProcessors()), config.getCloseTimeoutMs());
+        this.downloadManager = new DownloadManager(
+                Executors.newFixedThreadPool(poolSize), config.getCloseTimeoutMs());
         // 生成一个 128位的 AES 随机密钥
         try {
             KeyGenerator keyGen = KeyGenerator.getInstance("AES");
@@ -127,11 +129,15 @@ public abstract class AbstractJmClient implements JmClient, JmDownloadClient {
             logger.error("Failed to init memory safe key", e);
         }
 
-        this.initializationFuture.whenComplete((ignored, error) -> {
-            if (this.initializationFuture.isCancelled()) {
-                close();
-            }
+        this.initializer.setOnFutureCreated(future -> {
+            future.whenComplete((ignored, error) -> {
+                if (future.isCancelled()) {
+                    close();
+                }
+            });
         });
+        // 初始化最终失败后，允许阻塞等待初始化的请求触发重新初始化
+        this.domainManager.setRestartHandler(this::initializeAsync);
     }
 
     /**
@@ -147,68 +153,116 @@ public abstract class AbstractJmClient implements JmClient, JmDownloadClient {
     /**
      * 启动客户端初始化。
      * 并发或重复调用始终返回同一个 Future，初始化流程只执行一次。
+     * 初始化最终失败后再次调用会触发重新初始化；瞬时失败的自动重试由初始化流程内部完成。
      *
      * @return 客户端初始化结果
      */
     public final CompletableFuture<Void> initializeAsync() {
         Throwable submissionFailure = null;
+        CompletableFuture<Void> started;
         synchronized (initializationLock) {
-            if (initializationState != InitializationState.INITIALIZING || initializationStarted) {
-                return initializationFuture;
-            }
-            initializationStarted = true;
-            try {
-                initializationTask = internalExecutor.submit(this::runInitialization);
-            } catch (Throwable error) {
-                submissionFailure = error;
+            boolean restart = initializer.state() == JmClientInitializer.InitState.FAILED;
+            started = initializer.tryBegin(restart);
+            if (started != null) {
+                try {
+                    if (restart) {
+                        prepareRestart();
+                    }
+                    initializationTask = internalExecutor.submit(this::runInitialization);
+                } catch (Throwable error) {
+                    submissionFailure = error;
+                }
             }
         }
         if (submissionFailure != null) {
             failInitialization(submissionFailure);
         }
-        return initializationFuture;
+        return started != null ? started : initializer.future();
     }
 
+    /**
+     * 重新初始化前的资源恢复：重建初始化失败时被清理的自有资源
+     * （内部线程池、OkHttpClient、下载管理器）。
+     */
+    private void prepareRestart() {
+        resourcesClosed.set(false);
+        if (!isExternalExecutor) {
+            ExecutorService current = this.internalExecutor;
+            if (current == null || current.isShutdown()) {
+                this.internalExecutor = Executors.newFixedThreadPool(resolvedPoolSize);
+            }
+        }
+        if (this.httpClient.dispatcher().executorService().isShutdown()) {
+            this.httpClient = OkHttpBuilder.buildClient(config, cookieManager, domainManager);
+        }
+        if (this.downloadManager.isClosed()) {
+            this.downloadManager = new DownloadManager(
+                    Executors.newFixedThreadPool(resolvedPoolSize), config.getCloseTimeoutMs());
+        }
+        domainManager.resetForRestart();
+    }
+
+    /**
+     * 初始化流程入口：失败时按配置自动重试（带退避），全部失败才对外暴露异常。
+     */
     private void runInitialization() {
         initializationThread = Thread.currentThread();
         try {
-            ensureInitializationActive();
-            updateDomains();
-            ensureInitializationActive();
-
-            DomainProbe probe = createDomainProbe();
-            domainManager.probeAllDomains(probe);
-            ensureInitializationActive();
-
-            domainManager.enterInitializationContext();
-            try {
-                initialize();
-            } finally {
-                domainManager.exitInitializationContext();
-            }
-            ensureInitializationActive();
-
-            domainManager.startPeriodicProbe(probe, config.getDomainProbeIntervalMs());
-            synchronized (initializationLock) {
-                if (initializationState != InitializationState.INITIALIZING) {
-                    domainManager.shutdown();
+            int maxAttempts = Math.max(1, config.getInitRetryTimes() + 1);
+            long backoffMs = Math.min(60_000L, Math.max(0L, config.getInitRetryBackoffMs()));
+            for (int attempt = 1; ; attempt++) {
+                try {
+                    runInitializationAttempt();
+                    domainManager.setInitialized(true);
+                    if (initializer.markReady()) {
+                        logger.info("客户端初始化成功 (第 {}/{} 次尝试)", attempt, maxAttempts);
+                    }
                     return;
+                } catch (Throwable error) {
+                    boolean exhausted = attempt >= maxAttempts;
+                    boolean active = initializer.isRunning() && !Thread.currentThread().isInterrupted();
+                    if (exhausted || !active) {
+                        failInitialization(error);
+                        return;
+                    }
+                    long delay = backoffMs * attempt;
+                    logger.warn("客户端初始化第 {}/{} 次尝试失败，{}ms 后重试: {}",
+                            attempt, maxAttempts, delay, error.getMessage());
+                    try {
+                        Thread.sleep(delay);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        failInitialization(new CancellationException("Client initialization is no longer active."));
+                        return;
+                    }
                 }
-                domainManager.setInitialized(true);
-                initializationState = InitializationState.READY;
             }
-            initializationFuture.complete(null);
-        } catch (Throwable error) {
-            failInitialization(error);
         } finally {
             initializationThread = null;
         }
     }
 
-    private void ensureInitializationActive() {
-        if (initializationState != InitializationState.INITIALIZING || Thread.currentThread().isInterrupted()) {
-            throw new CancellationException("Client initialization is no longer active.");
+    /**
+     * 单次初始化尝试：更新域名 -> 并行探活 -> 客户端自身 initialize() -> 启动后台复探。
+     */
+    private void runInitializationAttempt() {
+        initializer.ensureActive();
+        updateDomains();
+        initializer.ensureActive();
+
+        DomainProbe probe = createDomainProbe();
+        domainManager.probeAllDomains(probe);
+        initializer.ensureActive();
+
+        domainManager.enterInitializationContext();
+        try {
+            initialize();
+        } finally {
+            domainManager.exitInitializationContext();
         }
+        initializer.ensureActive();
+
+        domainManager.startPeriodicProbe(probe, config.getDomainProbeIntervalMs());
     }
 
     private void failInitialization(Throwable cause) {
@@ -216,11 +270,9 @@ public abstract class AbstractJmClient implements JmClient, JmDownloadClient {
                 ? (JmClientInitializationException) cause
                 : new JmClientInitializationException("Failed to initialize JMComic client.", cause);
 
-        synchronized (initializationLock) {
-            if (initializationState != InitializationState.INITIALIZING) {
-                return;
-            }
-            initializationState = InitializationState.FAILED;
+        if (!initializer.markFailed()) {
+            // 已关闭或已完结，交由 close() 完成收尾
+            return;
         }
 
         logger.error("客户端初始化失败", exception);
@@ -228,7 +280,38 @@ public abstract class AbstractJmClient implements JmClient, JmDownloadClient {
         try {
             cleanupOwnedResources(false);
         } finally {
-            initializationFuture.completeExceptionally(exception);
+            initializer.completeFailure(exception);
+        }
+    }
+
+    /**
+     * 获取初始化 Future：仅在客户端完整初始化后成功完成。
+     *
+     * @return 客户端初始化结果
+     */
+    public CompletableFuture<Void> initializationFuture() {
+        return initializer.future();
+    }
+
+    /**
+     * 阻塞等待客户端完成初始化。
+     *
+     * @throws JmClientInitializationException 初始化失败或被关闭/取消时
+     */
+    public void awaitInitialized() {
+        try {
+            initializer.future().get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new JmClientInitializationException("Wait for client initialization was interrupted.", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof JmClientInitializationException initializationException) {
+                throw initializationException;
+            }
+            throw new JmClientInitializationException("Failed while waiting for client initialization.", cause);
+        } catch (CancellationException e) {
+            throw new JmClientInitializationException("Client initialization was cancelled.", e);
         }
     }
 
@@ -302,8 +385,36 @@ public abstract class AbstractJmClient implements JmClient, JmDownloadClient {
 
     @Override
     public byte[] fetchImageBytes(JmImage image) {
+        String downloadUrl = image.getDownloadUrl();
+        List<String> candidateDomains = JmImages.candidateDomains(downloadUrl, 3);
+        JmComicException lastError = null;
+        for (String domain : candidateDomains) {
+            String url = JmImages.replaceDomain(downloadUrl, domain);
+            try {
+                return doFetchImageBytes(url, image);
+            } catch (ResponseException | NetworkException e) {
+                // 当前图片域名不可达或资源不存在时，切换下一个候选 CDN 域名重试
+                lastError = e;
+                logger.warn("图片下载失败，切换图片域名重试 [{} -> {}]: {}",
+                        downloadUrl, url, e.getMessage());
+            }
+        }
+        if (lastError instanceof ResponseException responseException) {
+            throw new ResponseException("Failed to fetch image: " + lastError.getMessage(), responseException);
+        }
+        throw new NetworkException("Failed to fetch image due to I/O error", lastError);
+    }
+
+    /**
+     * 从指定 URL 下载图片并按需解密（单次尝试，无域名重试）。
+     *
+     * @param url   图片下载 URL
+     * @param image 图片元数据对象
+     * @return 解密后的图片二进制数据
+     */
+    private byte[] doFetchImageBytes(String url, JmImage image) {
         Request request = new Request.Builder()
-                .url(image.getDownloadUrl())
+                .url(url)
                 .get()
                 .build();
 
@@ -328,7 +439,7 @@ public abstract class AbstractJmClient implements JmClient, JmDownloadClient {
             // 对图片进行解密（禁漫图片使用异或/位移等算法加密）
             return JmImageTool.decryptImage(content, image);
         } catch (ResponseException e) {
-            throw new ResponseException("Failed to fetch image: " + e.getMessage(), e);
+            throw e;
         } catch (IOException e) {
             throw new NetworkException("Failed to fetch image due to I/O error", e);
         }
@@ -342,7 +453,10 @@ public abstract class AbstractJmClient implements JmClient, JmDownloadClient {
      * @return 封面url
      */
     public String getAlbumCoverUrl(String albumId, String size) {
-        String imageDomain = this.domainManager.getBestDomain();
+        // 封面与内页图片一样存放在图片 CDN 上，优先使用动态 img_host，而不是主站域名
+        String imageDomain = StringUtils.isNotBlank(JmConstants.CURRENT_IMAGE_HOST)
+                ? JmConstants.CURRENT_IMAGE_HOST
+                : this.domainManager.getBestDomain();
         return getAlbumCoverUrl(albumId, imageDomain, size);
     }
 
@@ -1087,7 +1201,7 @@ public abstract class AbstractJmClient implements JmClient, JmDownloadClient {
      * @return true表示已就绪
      */
     public boolean isInitialized() {
-        return this.initializationState == InitializationState.READY;
+        return initializer.isReady();
     }
 
     /**
@@ -1292,30 +1406,31 @@ public abstract class AbstractJmClient implements JmClient, JmDownloadClient {
 
     @Override
     public void close() {
-        Future<?> task;
-        synchronized (initializationLock) {
-            if (initializationState == InitializationState.CLOSED) {
-                return;
-            }
-            initializationState = InitializationState.CLOSED;
-            task = initializationTask;
+        if (!initializer.beginClose()) {
+            return;
         }
+
+        Future<?> task = initializationTask;
+        boolean waitForExecutor = Thread.currentThread() != initializationThread;
 
         domainManager.closeInitialization();
         if (task != null) {
             task.cancel(true);
         }
 
-        boolean waitForExecutor = Thread.currentThread() != initializationThread;
         try {
             cleanupOwnedResources(waitForExecutor);
         } finally {
-            initializationFuture.completeExceptionally(
+            initializer.completeAsClosed(
                     new JmClientInitializationException("Client was closed before initialization completed."));
         }
     }
 
     private void cleanupOwnedResources(boolean waitForExecutor) {
+        // 客户端已被重新初始化接管时跳过清理，避免误伤新纪元的资源
+        if (initializer.state() == JmClientInitializer.InitState.RUNNING) {
+            return;
+        }
         if (!resourcesClosed.compareAndSet(false, true)) {
             return;
         }

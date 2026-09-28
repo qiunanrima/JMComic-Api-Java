@@ -55,6 +55,10 @@ public final class JmConfiguration {
     private final long domainProbeIntervalMs;
     // 初始化探活单域名超时（毫秒），默认3秒
     private final long domainProbeTimeoutMs;
+    // 客户端初始化失败自动重试次数（总尝试 = 1 + initRetryTimes），默认2
+    private final int initRetryTimes;
+    // 初始化重试退避基数（毫秒），第 n 次重试等待 n * initRetryBackoffMs，默认1000
+    private final long initRetryBackoffMs;
     // 图片下载超时
     private final Duration imageTimeout;
     // 关闭时等待进行中任务完成的超时（毫秒）
@@ -75,6 +79,8 @@ public final class JmConfiguration {
         this.concurrentImageDownloads = builder.concurrentImageDownloads;
         this.domainProbeIntervalMs = builder.domainProbeIntervalMs;
         this.domainProbeTimeoutMs = builder.domainProbeTimeoutMs;
+        this.initRetryTimes = builder.initRetryTimes;
+        this.initRetryBackoffMs = builder.initRetryBackoffMs;
         this.imageTimeout = builder.imageTimeout;
         this.closeTimeoutMs = builder.closeTimeoutMs;
     }
@@ -162,6 +168,20 @@ public final class JmConfiguration {
         return domainProbeTimeoutMs;
     }
 
+    /**
+     * 客户端初始化失败自动重试次数（总尝试 = 1 + initRetryTimes）。
+     */
+    public int getInitRetryTimes() {
+        return initRetryTimes;
+    }
+
+    /**
+     * 初始化重试退避基数（毫秒），第 n 次重试等待 n * initRetryBackoffMs。
+     */
+    public long getInitRetryBackoffMs() {
+        return initRetryBackoffMs;
+    }
+
     public Duration getImageTimeout() {
         return imageTimeout;
     }
@@ -188,6 +208,8 @@ public final class JmConfiguration {
         private int concurrentImageDownloads = 20;
         private long domainProbeIntervalMs = 10 * 60 * 1000; // 10分钟
         private long domainProbeTimeoutMs = 3000;            // 3秒
+        private int initRetryTimes = 2;                      // 初始化失败自动重试次数
+        private long initRetryBackoffMs = 1000;              // 初始化重试退避基数
         private Duration imageTimeout = Duration.ofSeconds(60);
         private long closeTimeoutMs = 60_000;                // 60秒
 
@@ -281,6 +303,18 @@ public final class JmConfiguration {
             return this;
         }
 
+        public Builder initRetryTimes(int retryTimes) {
+            if (retryTimes < 0) throw new IllegalArgumentException("Init retry times must be non-negative.");
+            this.initRetryTimes = retryTimes;
+            return this;
+        }
+
+        public Builder initRetryBackoffMs(long backoffMs) {
+            if (backoffMs < 0) throw new IllegalArgumentException("Init retry backoff must be non-negative.");
+            this.initRetryBackoffMs = backoffMs;
+            return this;
+        }
+
         public Builder imageTimeout(Duration timeout) {
 
             this.imageTimeout = Objects.requireNonNull(timeout);
@@ -335,6 +369,12 @@ public final class JmConfiguration {
             }
             if (props.containsKey("domain.probe.timeout.ms")) {
                 this.domainProbeTimeoutMs(Long.parseLong(props.getProperty("domain.probe.timeout.ms")));
+            }
+            if (props.containsKey("init.retry.times")) {
+                this.initRetryTimes(Integer.parseInt(props.getProperty("init.retry.times")));
+            }
+            if (props.containsKey("init.retry.backoff.ms")) {
+                this.initRetryBackoffMs(Long.parseLong(props.getProperty("init.retry.backoff.ms")));
             }
             if (props.containsKey("image.timeout.seconds")) {
                 this.imageTimeout(Duration.ofSeconds(Long.parseLong(props.getProperty("image.timeout.seconds"))));

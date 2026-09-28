@@ -6,9 +6,8 @@ import io.github.jukomu.jmcomic.core.constant.JmConstants;
 import io.github.jukomu.jmcomic.core.net.interceptor.RetryAndDomainRedirectInterceptor;
 import io.github.jukomu.jmcomic.core.net.interceptor.UserAgentInterceptor;
 import io.github.jukomu.jmcomic.core.net.provider.JmDomainManager;
-import okhttp3.CookieJar;
-import okhttp3.JavaNetCookieJar;
 import okhttp3.OkHttpClient;
+import okhttp3.java.net.cookiejar.JavaNetCookieJar;
 
 import java.net.CookieManager;
 import java.net.CookiePolicy;
@@ -36,7 +35,6 @@ public final class OkHttpBuilder {
     public static HttpClientContext build(JmConfiguration config) {
         CookieManager cookieManager = new CookieManager();
         cookieManager.setCookiePolicy(CookiePolicy.ACCEPT_ALL);
-        CookieJar cookieJar = new JavaNetCookieJar(cookieManager);
 
         List<String> initialDomains;
         if (config.getClientType() == ClientType.API) {
@@ -46,6 +44,20 @@ public final class OkHttpBuilder {
         }
         JmDomainManager domainManager = new JmDomainManager(initialDomains);
 
+        OkHttpClient client = buildClient(config, cookieManager, domainManager);
+        return new HttpClientContext(client, domainManager, cookieManager);
+    }
+
+    /**
+     * 根据配置构建 OkHttpClient，并复用调用方提供的 Cookie 管理器与域名管理器。
+     * 用于客户端初始化失败重启时，在保留会话与域名状态的前提下重建底层 HTTP 客户端。
+     *
+     * @param config        用户的配置对象
+     * @param cookieManager 复用的 Cookie 管理器
+     * @param domainManager 复用的域名管理器
+     * @return 配置好的 OkHttpClient 实例
+     */
+    public static OkHttpClient buildClient(JmConfiguration config, CookieManager cookieManager, JmDomainManager domainManager) {
         OkHttpClient.Builder builder = new OkHttpClient.Builder();
 
         // 配置 proxy, timeout, cookieJar
@@ -54,13 +66,11 @@ public final class OkHttpBuilder {
         builder.readTimeout(config.getTimeout());
         builder.writeTimeout(config.getTimeout());
         builder.addInterceptor(new UserAgentInterceptor(config));
-        builder.cookieJar(cookieJar);
+        builder.cookieJar(new JavaNetCookieJar(cookieManager));
 
         builder.addInterceptor(new RetryAndDomainRedirectInterceptor(config.getRetryTimes(), domainManager));
         builder.retryOnConnectionFailure(false);
-        OkHttpClient client = builder.build();
-
-        return new HttpClientContext(client, domainManager, cookieManager);
+        return builder.build();
     }
 
     /**

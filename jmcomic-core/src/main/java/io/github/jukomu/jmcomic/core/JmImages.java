@@ -3,7 +3,15 @@ package io.github.jukomu.jmcomic.core;
 import io.github.jukomu.jmcomic.api.model.JmAlbum;
 import io.github.jukomu.jmcomic.api.model.JmAlbumMeta;
 import io.github.jukomu.jmcomic.api.model.JmImage;
+import io.github.jukomu.jmcomic.core.constant.JmConstants;
 import io.github.jukomu.jmcomic.core.crypto.JmImageTool;
+import okhttp3.HttpUrl;
+import org.apache.commons.lang3.StringUtils;
+
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 
 /**
  * JMComic 图片 URL 构建与解密辅助工具类，设计与 picapi 的 PicaImages 保持一致。
@@ -105,5 +113,45 @@ public final class JmImages {
             return rawBytes;
         }
         return JmImageTool.decryptImage(rawBytes, image);
+    }
+
+    /**
+     * 构建图片下载的候选域名列表（保序去重，最多 {@code limit} 个）。
+     * 顺序为：当前 URL 的域名 -> 动态 img_host -> 默认图片域名列表。
+     * 用于图片下载失败时跨 CDN 域名重试。
+     *
+     * @param imageUrl 当前图片 URL
+     * @param limit    最多返回的候选域名数量
+     * @return 候选域名列表
+     */
+    public static List<String> candidateDomains(String imageUrl, int limit) {
+        Set<String> domains = new LinkedHashSet<>();
+        HttpUrl parsed = HttpUrl.parse(imageUrl);
+        if (parsed != null) {
+            domains.add(parsed.host());
+        }
+        if (StringUtils.isNotBlank(JmConstants.CURRENT_IMAGE_HOST)) {
+            domains.add(JmConstants.CURRENT_IMAGE_HOST);
+        }
+        domains.addAll(JmConstants.DEFAULT_IMAGE_DOMAINS);
+
+        List<String> result = new ArrayList<>(domains);
+        return result.size() <= limit ? result : result.subList(0, limit);
+    }
+
+    /**
+     * 将图片 URL 的域名替换为指定域名，保留路径与查询参数。
+     *
+     * @param imageUrl 原图片 URL
+     * @param domain   新域名（不带协议）
+     * @return 替换域名后的 URL，解析失败时返回原 URL
+     */
+    public static String replaceDomain(String imageUrl, String domain) {
+        HttpUrl parsed = HttpUrl.parse(imageUrl);
+        if (parsed == null || parsed.host().equals(domain)) {
+            return imageUrl;
+        }
+        HttpUrl newUrl = parsed.newBuilder().host(domain).build();
+        return newUrl.toString();
     }
 }

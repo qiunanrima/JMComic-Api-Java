@@ -136,6 +136,13 @@ public final class JmConstants {
             "cdn-msp3.jmapinodeudzn.net"
     ));
 
+    /*
+     * 当前可用的图片 CDN 域名。
+     * 由 /setting 接口返回的 img_host 动态更新（官方客户端即为全部图片使用该域名），
+     * 该域名会由服务端频繁轮换，写死的默认列表仅作为其不可用时的兜底。
+     */
+    public static volatile String CURRENT_IMAGE_HOST = "";
+
     public static final List<String> API_URL_DOMAIN_SERVER_LIST = Collections.unmodifiableList(List.of(
             "https://rup4a04-c01.tos-ap-southeast-1.bytepluses.com/newsvr-2025.txt",
             "https://rup4a04-c02.tos-cn-hongkong.bytepluses.com/newsvr-2025.txt"

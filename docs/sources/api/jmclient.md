@@ -1,107 +1,137 @@
-# JmClient 接口
+# 客户端体系与接口
 
-`JmClient` 是核心客户端接口，定义了所有业务操作。通过 `JmComic.newApiClientAsync()` 或 `JmComic.newHtmlClientAsync()` 获取完成初始化的实例。
+JMComic-Api-Java 提供了多层客户端抽象：
+- **`Jm`**: 全局静态单例管理器，跨页面或组件共享登录态与客户端。
+- **`JmComicClient`**: 推荐的高级门面客户端，所有方法返回 `JmResult<T>`，内置 PicACG 语义对齐别名。
+- **`JmAsyncClient`**: 异步非阻塞客户端（通过 `client.async()` 获取），所有方法返回 `CompletableFuture<JmResult<T>>`。
+- **`AbstractJmClient` / `JmClient`**: 底层网络与协议客户端，包含直接与移动端 API 或 HTML 网页交互的原始实现。
 
-## 获取实例
+---
 
-```java
-JmConfiguration config = new JmConfiguration.Builder()
-        .clientType(ClientType.API)
-        .build();
+## 1. 全局单例管理器 `Jm`
 
-try (AbstractJmClient client = JmComic.newApiClientAsync(config).join()) {
-    // 使用已经完成初始化的 client
-} catch (CompletionException e) {
-    if (e.getCause() instanceof JmClientInitializationException initializationException) {
-        System.err.println("客户端初始化失败: " + initializationException.getMessage());
-    } else {
-        throw e;
+通过 `Jm` 可以极简地进行初始化、登录、数据拉取：
+
+```kotlin
+// 启动初始化（带配置块与会话存储）
+Jm.init(tokenStore = FileJmTokenStore(File("cache/jm_session.json"))) {
+    retryTimes(3)
+}
+
+// 获取门面客户端与异步客户端
+val client: JmComicClient = Jm.client
+val asyncClient: JmAsyncClient = Jm.async
+
+// 检查状态
+val isInit: Boolean = Jm.isInitialized
+val isLogged: Boolean = Jm.isLoggedIn
+```
+
+---
+
+## 2. JmComicClient 核心方法索引
+
+### 漫画与阅读（对齐 PicACG）
+
+| 方法名 | 返回类型 | 对齐说明与特性 |
+| :--- | :--- | :--- |
+| `getComicDetail(comicId)` | `JmResult<JmAlbum>` | 对齐 picapi `getComicDetail`（等价于 `getAlbum`） |
+| `getComicEpisodes(comicId)` | `JmResult<List<JmPhotoMeta>>` | 对齐 picapi `getComicEpisodes`，直接提取所有章节列表 |
+| `getComicEpisode(episodeId)` | `JmResult<JmPhoto>` | 获取某一章节的详细元数据与图片信息 |
+| `getComicPages(episodeId)` | `JmResult<List<JmImage>>` | 对齐 picapi `getComicPages`，直接提取该话全部单页图片 |
+| `searchComics(keyword)` | `JmResult<JmSearchPage>` | 对齐 picapi `searchComics`，便捷关键词搜索 |
+| `searchComics(keyword, page)` | `JmResult<JmSearchPage>` | 便捷关键词带页码搜索 |
+| `searchComics(query)` | `JmResult<JmSearchPage>` | 高级多维搜索（支持分类、标签、排序、时间范围） |
+| `favouriteComic(comicId)` | `JmResult<Void>` | 对齐 picapi `favouriteComic`，收藏或取消收藏 |
+| `likeComic(comicId)` | `JmResult<Void>` | 对齐 picapi `likeComic`，点赞或取消点赞 |
+| `getFavouriteComics(page)` | `JmResult<JmFavoritePage>` | 对齐 picapi `getFavouriteComics`，获取收藏夹分页 |
+| `punchIn()` | `JmResult<Void>` | 对齐 picapi `punchIn`，自动拉取活动状态并完成每日打卡 |
+| `fetchDecodedImageBytes(image)` | `JmResult<byte[]>` | 自动判断切片混淆并完成图片重组解密，直接输出纯净字节数组 |
+
+---
+
+### 原生本子与章节接口
+
+| 方法名 | 返回类型 | 说明 |
+| :--- | :--- | :--- |
+| `getAlbum(albumId)` | `JmResult<JmAlbum>` | 根据本子 ID 获取本子详情 |
+| `getComicRead(comicId)` | `JmResult<JmAlbum>` | 获取阅读数据（含图片预加载列表） |
+| `getPhoto(photoId)` | `JmResult<JmPhoto>` | 根据章节 ID 获取章节详情 |
+| `search(query)` | `JmResult<JmSearchPage>` | 执行多维检索 |
+| `fetchImageBytes(image)` | `JmResult<byte[]>` | 获取原始下载二进制字节数组（未反混淆） |
+| `getCategories(query)` | `JmResult<JmSearchPage>` | 获取分类排行 |
+| `getCategoriesList()` | `JmResult<JmCategoryList>` | 获取分类与标签树 |
+| `getAlbumDownloadInfo(albumId)` | `JmResult<JmAlbumDownloadInfo>` | 获取本子下载相关信息 |
+
+---
+
+### 用户、会话与 Cookie
+
+| 方法名 | 返回类型 | 说明 |
+| :--- | :--- | :--- |
+| `login(username, password)` | `JmResult<JmUserInfo>` | 用户登录，生成并维护会话 Cookie |
+| `logout()` | `JmResult<Void>` | 用户登出，清理 Cookie 与登录态 |
+| `getUserProfile(uid)` | `JmResult<JmUserProfile>` | 获取指定用户的详细资料 |
+| `getUserProfile()` | `JmResult<JmUserProfile>` | 获取当前已登录用户的详细资料 |
+| `editUserProfile(uid, params)` | `JmResult<JmUserProfile>` | 更新用户昵称等个人信息 |
+| `restoreSession(session)` | `void` | 恢复持久化的 `JmSession`（含 Cookie 列表） |
+| `extractSession()` | `JmSession` | 提取当前会话快照以便持久化存储 |
+| `extractCookies()` | `List<String>` | 提取当前 OkHttpClient 内部的所有 Cookie 字符串 |
+
+---
+
+### 评论与互动
+
+| 方法名 | 返回类型 | 说明 |
+| :--- | :--- | :--- |
+| `getComments(query)` | `JmResult<JmCommentList>` | 查询评论列表（支持漫画/小说/博客） |
+| `getComicComments(comicId, page)` | `JmResult<JmCommentList>` | 快捷获取指定漫画的评论分页 |
+| `postComicComment(comicId, content)` | `JmResult<JmComment>` | 发表漫画评论 |
+| `postComment(entityId, text)` | `JmResult<JmComment>` | 发表实体评论 |
+| `replyToComment(entityId, text, parentId)` | `JmResult<JmComment>` | 回复指定评论 |
+| `voteComment(commentId, voteType)` | `JmResult<JmVoteResult>` | 对评论投票点赞/点踩 |
+
+---
+
+### 收藏夹管理
+
+| 方法名 | 返回类型 | 说明 |
+| :--- | :--- | :--- |
+| `getFavorites(query)` | `JmResult<JmFavoritePage>` | 获取收藏夹列表（支持按文件夹筛选） |
+| `toggleAlbumFavorite(albumId, folderId)` | `JmResult<Void>` | 切换本子收藏状态或移动至指定文件夹 |
+| `manageFavoriteFolder(type, id, name, albumId)` | `JmResult<JmFavoriteFolderResult>` | 新建、重命名、删除收藏夹或移动漫画 |
+| `getTagsFavorite()` | `JmResult<List<JmTagFavorite>>` | 获取收藏的标签列表 |
+| `addFavoriteTags(tags)` | `JmResult<Void>` | 添加收藏标签 |
+| `removeFavoriteTags(tags)` | `JmResult<Void>` | 移除收藏标签 |
+
+---
+
+### 发现、连载追踪与历史
+
+| 方法名 | 返回类型 | 说明 |
+| :--- | :--- | :--- |
+| `getLatest(page)` | `JmResult<JmSearchPage>` | 分页获取最新上架本子 |
+| `getRandomRecommend()` | `JmResult<List<JmAlbumMeta>>` | 获取随机推荐本子 |
+| `getHotTags()` | `JmResult<List<String>>` | 获取热门搜索关键词 |
+| `getWeeklyPicksList()` | `JmResult<JmWeeklyPicksList>` | 获取每周必看期数列表 |
+| `getWeeklyPicksDetail(categoryId)` | `JmResult<JmWeeklyPicksDetail>` | 获取每周必看单期详情 |
+| `getSerialization(page)` | `JmResult<JmSearchPage>` | 分页获取连载中本子 |
+| `getAlbumTrackingList(page)` | `JmResult<JmTrackingPage>` | 获取追更列表 |
+| `setAlbumSertracking(albumId)` | `JmResult<Void>` | 切换漫画追更状态 |
+| `getWatchHistory(page)` | `JmResult<List<JmAlbumMeta>>` | 获取观看历史记录 |
+| `deleteWatchHistory(id)` | `JmResult<Void>` | 删除观看历史记录 |
+
+---
+
+## 3. 异步客户端 `JmAsyncClient`
+
+通过 `client.async()` 或 `Jm.async` 访问。所有方法的参数与 `JmComicClient` 保持 100% 对齐，返回值为 `CompletableFuture<JmResult<T>>`：
+
+```kotlin
+val future = Jm.async.getComicDetail("540709")
+future.thenAccept { res ->
+    res.onSuccess { comic ->
+        println("异步获取完成: ${comic.title()}")
     }
 }
 ```
-
-`newApiClient()` 和 `newHtmlClient()` 为兼容旧代码继续保留，但已弃用。它们仍会立即返回；初始化失败不会抛给 executor 线程的默认未捕获异常处理器。新代码应使用异步工厂观察初始化结果。
-
-## 漫画相关
-
-| 方法 | 返回类型 | 说明 |
-|------|----------|------|
-| `getAlbum(String albumId)` | `JmAlbum` | 获取本子详情 |
-| `getComicRead(String comicId)` | `JmAlbum` | 获取阅读数据（含图片列表） |
-| `getPhoto(String photoId)` | `JmPhoto` | 获取章节详情 |
-| `search(SearchQuery query)` | `JmSearchPage` | 搜索本子 |
-| `getCategories(SearchQuery query)` | `JmSearchPage` | 获取分类排行 |
-| `getCategoriesList()` | `JmCategoryList` | 获取分类列表 |
-| `fetchImageBytes(JmImage image)` | `byte[]` | 获取图片二进制数据 |
-| `getAlbumDownloadInfo(String albumId)` | `JmAlbumDownloadInfo` | 获取本子下载信息 |
-
-## 用户与会话
-
-| 方法 | 返回类型 | 说明 |
-|------|----------|------|
-| `login(String, String)` | `JmUserInfo` | 登录 |
-| `logout()` | `void` | 登出 |
-| `getUserProfile(String uid)` | `JmUserProfile` | 获取用户资料 |
-| `editUserProfile(String uid, Map)` | `JmUserProfile` | 编辑用户资料 |
-
-## 评论
-
-| 方法 | 返回类型 | 说明 |
-|------|----------|------|
-| `getComments(ForumQuery)` | `JmCommentList` | 获取评论列表 |
-| `postComment(String, String)` | `JmComment` | 发表本子评论 |
-| `replyToComment(String, String, String)` | `JmComment` | 回复本子评论 |
-| `postBlogComment(String, String, String)` | `JmComment` | 发表博客评论 |
-| `replyToBlogComment(String, String, String, String)` | `JmComment` | 回复博客评论 |
-
-## 收藏
-
-| 方法 | 返回类型 | 说明 |
-|------|----------|------|
-| `getFavorites(FavoriteQuery)` | `JmFavoritePage` | 获取收藏夹 |
-| `toggleAlbumFavorite(String, String)` | `void` | 切换收藏状态 |
-| `manageFavoriteFolder(...)` | `JmFavoriteFolderResult` | 管理收藏文件夹 |
-| `getTagsFavorite()` | `List<JmTagFavorite>` | 获取收藏标签 |
-| `addFavoriteTags(List)` | `void` | 添加收藏标签 |
-| `removeFavoriteTags(List)` | `void` | 删除收藏标签 |
-
-## 发现
-
-| 方法 | 返回类型 | 说明 |
-|------|----------|------|
-| `getHotTags()` | `List<String>` | 热门标签 |
-| `getLatest(int page)` | `JmSearchPage` | 最新上架 |
-| `getRandomRecommend()` | `List<JmAlbumMeta>` | 随机推荐 |
-| `getPromote()` | `Map` | 首页推广 |
-| `getWeeklyPicksList()` | `JmWeeklyPicksList` | 每周必看列表 |
-| `getWeeklyPicksDetail(String)` | `JmWeeklyPicksDetail` | 每周必看详情 |
-| `getSerialization(int page)` | `JmSearchPage` | 连载系列 |
-
-## 通知与追踪
-
-| 方法 | 返回类型 | 说明 |
-|------|----------|------|
-| `getNotifications()` | `JmNotificationPage` | 通知列表 |
-| `markNotification(String, int)` | `void` | 标记通知 |
-| `getUnreadCount()` | `Map` | 未读数量 |
-| `getAlbumTrackingList(int)` | `JmTrackingPage` | 追踪列表 |
-| `getAlbumSertracking(String)` | `boolean` | 查询追踪状态 |
-| `setAlbumSertracking(String)` | `void` | 设置追踪 |
-
-## 签到
-
-| 方法 | 返回类型 | 说明 |
-|------|----------|------|
-| `getDailyCheckInStatus(String)` | `JmDailyCheckInStatus` | 签到状态 |
-| `doDailyCheckin(String, String)` | `void` | 执行签到 |
-| `getDailyCheckInOptions(String)` | `List` | 签到选项 |
-| `filterDailyCheckInList(String)` | `List` | 签到历史 |
-
-## 其他
-
-| 方法 | 返回类型 | 说明 |
-|------|----------|------|
-| `getWatchHistory(int)` | `List<JmAlbumMeta>` | 浏览历史 |
-| `deleteWatchHistory(String)` | `void` | 删除历史 |
-| `toggleAlbumLike(String)` | `void` | 切换点赞 |
-| `getTasks(String, String)` | `JmTaskList` | 任务列表 |

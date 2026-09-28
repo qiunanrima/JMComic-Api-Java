@@ -42,6 +42,8 @@ public final class JmDomainManager {
     private final ThreadLocal<Boolean> initializationContext = new ThreadLocal<>();
     private volatile InitializationState initializationState = InitializationState.INITIALIZING;
     private volatile CompletableFuture<Void> initializationFuture = new CompletableFuture<>();
+    // 客户端初始化最终失败后，供阻塞等待方触发重新初始化的回调
+    private volatile Runnable restartHandler;
 
     /**
      * 后台复探定时器，由 startPeriodicProbe 创建
@@ -163,6 +165,26 @@ public final class JmDomainManager {
             initializationFuture = CompletableFuture.failedFuture(exception);
         } else {
             initializationFuture.completeExceptionally(exception);
+        }
+    }
+
+    /**
+     * 注册初始化重启回调。
+     * 客户端初始化最终失败后，阻塞等待初始化的请求可通过该回调触发客户端重新初始化，
+     * 实现网络恢复后的自愈。
+     */
+    public void setRestartHandler(Runnable handler) {
+        this.restartHandler = handler;
+    }
+
+    /**
+     * 重置为待初始化状态（仅 FAILED 时生效），用于客户端初始化失败后的重新初始化。
+     * 会创建新的初始化 Future，唤醒后续等待方重新等待。
+     */
+    public synchronized void resetForRestart() {
+        if (initializationState == InitializationState.FAILED) {
+            initializationState = InitializationState.INITIALIZING;
+            initializationFuture = new CompletableFuture<>();
         }
     }
 
@@ -321,24 +343,33 @@ public final class JmDomainManager {
     // == 内部方法 ==
 
     private void blockUntilInitialized() {
-        CompletableFuture<Void> future = initializationFuture;
-        if (initializationState == InitializationState.READY) {
-            return;
-        }
-        try {
-            future.get();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new JmClientInitializationException(
-                    "Wait for client initialization was interrupted.", e);
-        } catch (ExecutionException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof JmClientInitializationException initializationException) {
-                throw initializationException;
+        for (int attempt = 0; ; attempt++) {
+            if (initializationState == InitializationState.READY) {
+                return;
             }
-            throw new JmClientInitializationException("Failed while waiting for client initialization.", cause);
-        } catch (CancellationException e) {
-            throw new JmClientInitializationException("Client initialization was cancelled.", e);
+            CompletableFuture<Void> future = initializationFuture;
+            try {
+                future.get();
+                return;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new JmClientInitializationException(
+                        "Wait for client initialization was interrupted.", e);
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause();
+                Runnable restart = restartHandler;
+                if (attempt < 1 && restart != null) {
+                    // 初始化最终失败时，给阻塞中的请求一次触发重新初始化的机会（自愈）
+                    restart.run();
+                    continue;
+                }
+                if (cause instanceof JmClientInitializationException initializationException) {
+                    throw initializationException;
+                }
+                throw new JmClientInitializationException("Failed while waiting for client initialization.", cause);
+            } catch (CancellationException e) {
+                throw new JmClientInitializationException("Client initialization was cancelled.", e);
+            }
         }
     }
 }

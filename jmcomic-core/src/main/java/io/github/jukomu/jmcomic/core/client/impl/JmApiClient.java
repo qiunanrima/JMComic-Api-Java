@@ -114,6 +114,8 @@ public final class JmApiClient extends AbstractJmClient implements JmNovelClient
 
         String imageHost = normalizeImageHost(imgHost);
         if (imageHost != null) {
+            // 官方客户端即为全部图片使用 img_host，该域名由服务端频繁轮换，必须作为首选
+            JmConstants.CURRENT_IMAGE_HOST = imageHost;
             boolean added;
             synchronized (JmConstants.DEFAULT_IMAGE_DOMAINS) {
                 added = !JmConstants.DEFAULT_IMAGE_DOMAINS.contains(imageHost) && JmConstants.DEFAULT_IMAGE_DOMAINS.add(imageHost);

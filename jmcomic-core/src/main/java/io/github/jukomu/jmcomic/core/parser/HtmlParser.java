@@ -66,8 +66,8 @@ public final class HtmlParser {
                 extractViewsCount(doc),
                 // 评论数
                 ParseHelper.parseIntOrDefault(ParseHelper.selectFirstText(doc, "#total_video_comments", "comment count"), 0),
-                // 封面/分类 (HTML 解析不支持)
-                null,
+                // 封面
+                parseAlbumCover(doc),
                 null,
                 null,
                 // 作者/作品/演员/标签
@@ -103,8 +103,51 @@ public final class HtmlParser {
         }
     }
 
-    private static String parseAlbumId(Document doc) {
-        Element albumIdElement = doc.getElementById("album_id");
+    /**
+     * 解析本子详情页的封面图 URL。
+     * 优先取 og:image meta，其次取封面区域的懒加载图片（data-src 或 src）。
+     *
+     * @param doc 本子详情页 DOM
+     * @return 完整的封面图片 URL，找不到时返回空字符串
+     */
+    private static String parseAlbumCover(Document doc) {
+        Element ogImage = doc.selectFirst("meta[property=og:image]");
+        if (ogImage != null && StringUtils.isNotBlank(ogImage.attr("content"))) {
+            return absolutizeUrl(ogImage.attr("content").trim());
+        }
+
+        Element coverImg = doc.selectFirst("div.thumb-overlay img, .thumb-overlay-albums img");
+        if (coverImg != null) {
+            String cover = coverImg.attr("data-src");
+            if (StringUtils.isBlank(cover)) {
+                cover = coverImg.attr("src");
+            }
+            if (StringUtils.isNotBlank(cover)) {
+                return absolutizeUrl(cover.trim());
+            }
+        }
+        return "";
+    }
+
+    /**
+     * 将页面中提取的图片地址规范化为绝对 URL。
+     * 协议相对地址（"//cdn.xxx/..."）补 https；
+     * 站点相对地址（"/media/..."）落到当前可用的图片 CDN 上（封面资源与 API 客户端共用同一套 CDN）。
+     */
+    private static String absolutizeUrl(String url) {
+        if (StringUtils.isBlank(url)) {
+            return "";
+        }
+        if (url.startsWith("//")) {
+            return JmConstants.PROTOCOL_HTTPS + url.substring(2);
+        }
+        if (url.startsWith("/")) {
+            return JmConstants.PROTOCOL_HTTPS + ApiParser.pickImageDomain() + url;
+        }
+        return url;
+    }
+
+    private static String parseAlbumId(Document doc) {        Element albumIdElement = doc.getElementById("album_id");
         if (albumIdElement != null && StringUtils.isNotBlank(albumIdElement.attr("value"))) {
             return albumIdElement.attr("value");
         }
@@ -254,7 +297,18 @@ public final class HtmlParser {
                             .map(Element::text)
                             .collect(Collectors.toList());
 
-                    return new JmAlbumMeta(id, title, authors, tags);
+                    // 提取封面（懒加载图片优先取 data-src）
+                    String cover = "";
+                    Element coverImg = link.selectFirst("img");
+                    if (coverImg != null) {
+                        cover = coverImg.attr("data-src");
+                        if (StringUtils.isBlank(cover)) {
+                            cover = coverImg.attr("src");
+                        }
+                        cover = absolutizeUrl(cover.trim());
+                    }
+
+                    return new JmAlbumMeta(id, title, authors, tags, null, cover, null, null);
                 })
                 .filter(Objects::nonNull)
                 .collect(Collectors.toList());
@@ -456,7 +510,17 @@ public final class HtmlParser {
                 : Collections.emptyList();
         List<String> tags = ParseHelper.selectAllText(parent, "div.tags a");
 
-        return new JmAlbumMeta(id, title, authors, tags);
+        // 提取封面（懒加载图片优先取 data-src）
+        String cover = "";
+        if (img != null) {
+            cover = img.attr("data-src");
+            if (StringUtils.isBlank(cover)) {
+                cover = img.attr("src");
+            }
+            cover = absolutizeUrl(cover.trim());
+        }
+
+        return new JmAlbumMeta(id, title, authors, tags, null, cover, null, null);
     }
 
     /**

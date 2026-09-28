@@ -5,6 +5,7 @@ import io.github.jukomu.jmcomic.api.result.JmResult
 import io.github.jukomu.jmcomic.core.client.JmAsyncClient
 import io.github.jukomu.jmcomic.core.client.JmComicClient
 import io.github.jukomu.jmcomic.core.config.JmConfiguration
+import java.util.concurrent.CompletableFuture
 
 /**
  * 全局单例管理器，跨页面或组件共享同一个 [JmComicClient] 与登录会话。
@@ -110,6 +111,28 @@ object Jm {
         val builder = JmConfiguration.builder()
         builder.block()
         return init(builder.build(), tokenStore)
+    }
+
+    /**
+     * 异步初始化全局客户端：返回的 [CompletableFuture] 仅在客户端完整初始化后成功完成，
+     * 初始化失败（含自动重试后仍失败）时以
+     * [io.github.jukomu.jmcomic.api.exception.JmClientInitializationException] 异常完成。
+     *
+     * ### Kotlin 使用示例
+     * ```kotlin
+     * Jm.initAsync { retryTimes(3) }.thenAccept { client ->
+     *     println("客户端就绪: ${client.isInitialized}")
+     * }
+     * ```
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun initAsync(
+        config: JmConfiguration = JmConfiguration.defaultConfig(),
+        tokenStore: JmTokenStore = MemoryJmTokenStore
+    ): CompletableFuture<JmComicClient> {
+        val client = init(config, tokenStore)
+        return client.initializationFuture().thenApply { client }
     }
 
     /**
